@@ -1,10 +1,9 @@
 #import turtle
 from typing import List
-#from PIL import Image, ImageDraw
-import sys
+from PIL import Image, ImageDraw
+import imageio
+import numpy as np
 from math import sin, cos, sqrt, atan2, radians, tan
-
-print(sys.version)
 
 def normalize(v):
     if v.x == 0 and v.y == 0 and v.z == 0:
@@ -83,50 +82,48 @@ class Face:
 
 class Camera:
 
-    def __init__(self, pos: Pos, target: Pos, rotation: Vec2, fov: int):
+    def __init__(self, pos: Pos, rotation: Vec2, fov: int, resolution: (int, int)):
         self.pos = pos
-        self.target = target
+        self.width, self.height = resolution
         self.up = Pos(0,1,0)
         self.fov = fov
         self.rotation = rotation
-        self.__generate_view_matrix__()
     
-    def __generate_view_matrix__(self):
-        forward = normalize(self.target - self.pos)
-        right = normalize(cross(forward, self.up))
-        self.up = cross(right, forward)
-        up = self.up
-        self.view_matrix = [[right.x, right.y, right.z, -dot(right, self.pos)],
-                            [up.x, up.y, up.z, -dot(up, self.pos)],
-                            [-forward.x, -forward.y, -forward.z , dot(forward, self.pos)],
-                            [0, 0, 0, 1]]
-    
-    def raster_to_view_space(self, vertex):
-        return multiplyMatrixVector(self.view_matrix, [vertex.x, vertex.y, vertex.z, 1])
-    
-    def raster(self, vertices: List[Vertex]):
+
+    def raster(self, vertices: List[Vertex], faces: List[Face]):
         # view_space_vertices = []
         # for vertex in vertices:
         #     final_vertex = self.raster_to_view_space(vertex)
         #     view_space_vertices.append(Vertex(Pos(final_vertex[0], final_vertex[1], final_vertex[2])))
         
         # return view_space_vertices
-        width = 512
-        height = 512
-        img = Image.new("RGB", (width, height), color=(0, 0, 0))
-        f = 1/tan(self.fov/2)
+        img = Image.new("RGB", (self.width, self.height), color=(0, 0, 0))
+        screen_space_vertices = []
+        f = 1/tan(radians(self.fov / 2))
         for vertex in vertices:
             vertex = vertex - self.pos
             vertex.rotate(-self.rotation.x, -self.rotation.y, Pos(0, 0, 0))
+            if vertex.pos.z < 0.001:
+                continue
             xclip = (f * vertex.pos.x)/vertex.pos.z
-            xscreen = (xclip + 1) / 2 * width
+            xscreen = (xclip + 1) / 2 * self.width
             yclip = (f * vertex.pos.y)/vertex.pos.z
-            yscreen = (yclip + 1) / 2 * height
-            img.putpixel((round(xscreen), round(yscreen)), (0,255,0,0))
+            yscreen = (1 - yclip) / 2 * self.height
+            if 0 <= round(xscreen) < self.width and 0 <= round(yscreen) < self.height:
+                img.putpixel((round(xscreen), round(yscreen)), (0, 255, 0))
+            screen_space_vertices.append(Vec2(round(xscreen), round(yscreen)))
             
+        print(f"x: {screen_space_vertices[0].x}, y: {screen_space_vertices[0].y}")
+        img_draw = ImageDraw.Draw(img)
+
+        faces.sort(key=lambda x: (vertices[x.ipos.x - 1].pos.z + vertices[x.ipos.y - 1].pos.z + vertices[x.ipos.z - 1].pos.z)/3, reverse=True)
+
+        for face in faces:
+            #print([(screen_space_vertices[face.ipos.x - 1].x, screen_space_vertices[face.ipos.x - 1].y), (screen_space_vertices[face.ipos.y - 1].x, screen_space_vertices[face.ipos.y - 1].y), (screen_space_vertices[face.ipos.z - 1].x, screen_space_vertices[face.ipos.z - 1].y)])
+            img_draw.polygon([(screen_space_vertices[face.ipos.x - 1].x, screen_space_vertices[face.ipos.x - 1].y), (screen_space_vertices[face.ipos.y - 1].x, screen_space_vertices[face.ipos.y - 1].y), (screen_space_vertices[face.ipos.z - 1].x, screen_space_vertices[face.ipos.z - 1].y)], fill=("white"), outline='black')
 
         self.rotation = Vec2(0, 0)
-        img.save("output.png")
+        return img
 
 
 
@@ -138,12 +135,42 @@ with open("./teapot.obj", "r") as file:
         if line == "":
             continue
         data = line.split(" ")
-        if line[0] == "v":
+        if data[0] == "v":
+            if len(data) < 3:
+                continue
             vertices.append(Vertex(Pos(float(data[1]), float(data[2]), float(data[3]))))
-        elif line[0] == "f":
-            faces.append(Face(Pos(int(data[1]), int(data[2]), int(data[3]))))
+        elif data[0] == "f":
+            if len(data) < 3:
+                continue
+            if "/" in line:
+                    faces.append(Face(Pos(int(data[1].split("/")[0]), int(data[2].split("/")[0]), int(data[3].split("/")[0]))))
+            else:
+                faces.append(Face(Pos(int(data[1]), int(data[2]), int(data[3]))))
     
-camera = Camera(Pos(0,0,0), Pos(0,0,0), Vec2(0,0), 90)
+def rotate_obj(vertices: List[Vertex], yaw, pitch):
+    centere = Pos(0,0,0)
+    vertices_len = len(vertices)
 
-camera.raster(vertices)
+    for vertex in vertices:
+        centere.x += vertex.pos.x
+        centere.y += vertex.pos.y
+        centere.z += vertex.pos.z
+    
+    centere.x = centere.x / vertices_len
+    centere.y = centere.y / vertices_len
+    centere.z = centere.z / vertices_len
 
+    for vertex in vertices:
+        vertex.rotate(yaw, pitch, centere)
+
+camera = Camera(Pos(0,1,-5), Vec2(0,0), 45, (1080, 1080))
+
+writer = imageio.get_writer("./output.mp4", format="mp4", mode="I", fps=60)
+
+camera.raster(vertices, faces).save("output.png")
+
+# for i in range(360):
+#     rotate_obj(vertices, 1, 0)
+#     writer.append_data(np.asarray(camera.raster(vertices, faces)))
+
+writer.close()
